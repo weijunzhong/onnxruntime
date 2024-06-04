@@ -236,6 +236,7 @@ option(onnxruntime_ENABLE_TRITON "Enable Triton" OFF)
 
 # composable kernel is managed automatically, unless user want to explicitly disable it, it should not be manually set
 option(onnxruntime_USE_COMPOSABLE_KERNEL "Enable composable kernel for ROCm EP" ON)
+option(onnxruntime_USE_COMPOSABLE_KERNEL_CK_TILE "Enable ck_tile for composable kernel" ON)
 option(onnxruntime_USE_ROCBLAS_EXTENSION_API "Enable rocblas tuning for ROCm EP" OFF)
 option(onnxruntime_USE_TRITON_KERNEL "Enable triton compiled kernel" OFF)
 option(onnxruntime_BUILD_KERNEL_EXPLORER "Build Kernel Explorer for testing and profiling GPU kernels" OFF)
@@ -362,6 +363,11 @@ if (onnxruntime_USE_ROCM)
   if (onnxruntime_USE_COMPOSABLE_KERNEL AND ROCM_VERSION_DEV VERSION_LESS "5.3")
     message(WARNING "composable kernel is only supported on ROCm >= 5.3")
     set(onnxruntime_USE_COMPOSABLE_KERNEL OFF)
+    set(onnxruntime_USE_COMPOSABLE_KERNEL_CK_TILE OFF)
+  endif()
+  if (onnxruntime_USE_COMPOSABLE_KERNEL_CK_TILE AND ROCM_VERSION_DEV VERSION_LESS "5.3")
+    message(FATAL_ERROR "ck_tile can only be enabled on ROCm >= 5.0 due to compilation speed")  # FIXME:
+    set(onnxruntime_USE_COMPOSABLE_KERNEL_CK_TILE OFF)
   endif()
 endif()
 
