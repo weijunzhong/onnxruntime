@@ -50,7 +50,9 @@ Abstract:
 #include <arm_neon.h>
 #endif
 #if defined(__x86_64__) || defined(__i386__)
+#if !defined(signature_VORTEX_ebx) && !defined(signature_NEXGEN_ebx) && !defined(signature_AMD_ebx)//workaround for Bug 96238 - [i386] cpuid.h header needs include guards
 #include <cpuid.h>
+#endif
 #if defined(__GNUC__) && __GNUC__ >= 12
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"  // GCC 12 warns about uninitialized variables in immintrin.h.
@@ -191,6 +193,8 @@ class MLASCPUIDInfo
 
     bool HasArmSVE_I8MM() const { return has_arm_sve_i8mm_; }
 
+    bool HasArmNeon_BF16() const { return has_arm_neon_bf16_; }
+
    private:
     MLASCPUIDInfo();
 
@@ -198,6 +202,7 @@ class MLASCPUIDInfo
     bool has_fp16_{false};
     bool has_arm_neon_i8mm_{false};
     bool has_arm_sve_i8mm_{false};
+    bool has_arm_neon_bf16_{false};
 };
 using MLAS_CPUIDINFO = MLASCPUIDInfo;
 
@@ -354,6 +359,20 @@ size_t
     );
 
 #else
+
+#if defined(__aarch64__) && defined(__linux__)
+typedef size_t(MLASCALL MLAS_SBGEMM_FLOAT_KERNEL)(
+    const float* A,
+    const bfloat16_t* B,
+    float* C,
+    size_t CountK,
+    size_t CountM,
+    size_t CountN,
+    size_t lda,
+    size_t ldc,
+    const float* Bias
+);
+#endif
 
 typedef
 size_t
@@ -661,6 +680,24 @@ void
     float Scale,
     int16_t ZeroPoint);
 
+typedef
+void
+(MLASCALL MLAS_QUANTIZE_LINEAR_U4_KERNEL)(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint);
+
+typedef
+void
+(MLASCALL MLAS_QUANTIZE_LINEAR_S4_KERNEL)(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint);
+
 template<typename InputType, typename FilterType>
 struct MLAS_QUANT_KERNEL
 {
@@ -725,6 +762,10 @@ extern "C" {
 #else
     MLAS_GEMM_FLOAT_KERNEL MlasSgemmKernelZero;
     MLAS_GEMM_FLOAT_KERNEL MlasSgemmKernelAdd;
+#if defined(__aarch64__) && defined(__linux__)
+    MLAS_SBGEMM_FLOAT_KERNEL MlasSbgemmKernelZero;
+    MLAS_SBGEMM_FLOAT_KERNEL MlasSbgemmKernelAdd;
+#endif
     MLAS_GEMM_DOUBLE_KERNEL MlasDgemmKernelZero;
     MLAS_GEMM_DOUBLE_KERNEL MlasDgemmKernelAdd;
 #endif
@@ -803,6 +844,8 @@ extern "C" {
     MLAS_QUANTIZE_LINEAR_U8_KERNEL MlasQuantizeLinearU8Kernel;
     MLAS_QUANTIZE_LINEAR_S16_KERNEL MlasQuantizeLinearS16Kernel;
     MLAS_QUANTIZE_LINEAR_U16_KERNEL MlasQuantizeLinearU16Kernel;
+    MLAS_QUANTIZE_LINEAR_S4_KERNEL MlasQuantizeLinearS4Kernel;
+    MLAS_QUANTIZE_LINEAR_U4_KERNEL MlasQuantizeLinearU4Kernel;
 #if defined(MLAS_TARGET_AMD64)
     MLAS_COMPUTE_UNARY_FLOAT_KERNEL MlasErfKernelFma3;
     MLAS_COMPUTE_UNARY_FLOAT_KERNEL MlasComputeExpF32KernelFma3;
@@ -823,6 +866,7 @@ extern "C" {
     MLAS_REDUCE_MINIMUM_MAXIMUM_FLOAT_KERNEL MlasReduceMinimumMaximumF32Kernel;
 #if defined(MLAS_TARGET_AMD64)
     MLAS_REDUCE_MAXIMUM_FLOAT_KERNEL MlasReduceMaximumF32KernelAvx;
+    MLAS_REDUCE_MAXIMUM_FLOAT_KERNEL MlasReduceMaximumF32KernelAvx512F;
     MLAS_REDUCE_MINIMUM_MAXIMUM_FLOAT_KERNEL MlasReduceMinimumMaximumF32KernelAvx;
 #endif
 
@@ -853,6 +897,10 @@ extern "C" {
 #define MLAS_SGEMM_THREAD_COMPLEXITY                (size_t(64) * size_t(1024))
 #define MLAS_DGEMM_THREAD_COMPLEXITY                (size_t(64) * size_t(1024))
 #define MLAS_QGEMM_THREAD_COMPLEXITY                65536
+
+#if defined(__aarch64__) && defined(__linux__)
+#define MLAS_SBGEMM_THREAD_COMPLEXITY (size_t(64) * size_t(1024))
+#endif
 
 //
 // Single-threaded single precision matrix/matrix multiply operation.
@@ -942,6 +990,12 @@ extern const MLAS_FPQ4GEMM_DISPATCH MlasFpQ4GemmDispatchAvx512;
 struct MLAS_SQNBIT_GEMM_DISPATCH;
 
 extern const MLAS_SQNBIT_GEMM_DISPATCH MlasSQNBitGemmDispatchNeon;
+
+extern const MLAS_SQNBIT_GEMM_DISPATCH MlasSQNBitGemmDispatchAvx2;
+
+extern const MLAS_SQNBIT_GEMM_DISPATCH MlasSQNBitGemmDispatchAvx512;
+
+extern const MLAS_SQNBIT_GEMM_DISPATCH MlasSQNBitGemmDispatchAvx512vnni;
 
 //
 // Quantized depthwise convolution kernels.
@@ -1049,6 +1103,8 @@ struct MLAS_PLATFORM {
     MLAS_QUANTIZE_LINEAR_U8_KERNEL* QuantizeLinearU8Kernel;
     MLAS_QUANTIZE_LINEAR_S16_KERNEL* QuantizeLinearS16Kernel;
     MLAS_QUANTIZE_LINEAR_U16_KERNEL* QuantizeLinearU16Kernel;
+    MLAS_QUANTIZE_LINEAR_S4_KERNEL* QuantizeLinearS4Kernel;
+    MLAS_QUANTIZE_LINEAR_U4_KERNEL* QuantizeLinearU4Kernel;
 #endif
 #if defined(MLAS_TARGET_AMD64)
     MLAS_SGEMM_KERNEL_M1_ROUTINE* KernelM1Routine;
@@ -1078,6 +1134,8 @@ struct MLAS_PLATFORM {
     MLAS_QUANTIZE_LINEAR_U8_KERNEL* QuantizeLinearU8Kernel;
     MLAS_QUANTIZE_LINEAR_S16_KERNEL* QuantizeLinearS16Kernel;
     MLAS_QUANTIZE_LINEAR_U16_KERNEL* QuantizeLinearU16Kernel;
+    MLAS_QUANTIZE_LINEAR_S4_KERNEL* QuantizeLinearS4Kernel;
+    MLAS_QUANTIZE_LINEAR_U4_KERNEL* QuantizeLinearU4Kernel;
     uint32_t NchwcBlockSize;
     uint32_t PreferredBufferAlignment;
     int32_t MaximumThreadCount;
@@ -2463,3 +2521,51 @@ MlasThreadedBufAlloc(size_t size)
         ThreadedBufSize = size;
     }
 }
+
+//
+// Utilities for INT4 quantization.
+//
+
+template<bool Signed>
+struct Int4Traits;
+
+template<>
+struct Int4Traits<true> {
+    using UnpackedType = int8_t;
+    static constexpr int8_t Min = -8;
+    static constexpr int8_t Max = 7;
+};
+
+template<>
+struct Int4Traits<false> {
+    using UnpackedType = uint8_t;
+    static constexpr int8_t Min = 0;
+    static constexpr int8_t Max = 15;
+};
+
+template<typename UnpackedType>
+MLAS_FORCEINLINE
+void
+MlasSetInt4Element(uint8_t* Output, size_t ElemIndex, UnpackedType Value)
+{
+    static_assert(std::is_same_v<UnpackedType, uint8_t> || std::is_same_v<UnpackedType, int8_t>);
+
+    const size_t OutputIndex = ElemIndex >> 1;  // which byte
+    const size_t NibbleIndex = ElemIndex & 0x1; // which 4-bit elem in the byte
+    const uint8_t Shift = static_cast<uint8_t>(NibbleIndex << 2); // Either 0 or 4
+    const uint8_t Mask = static_cast<uint8_t>(0xF0 >> Shift);
+    uint8_t* Dst = &Output[OutputIndex];
+
+    *Dst &= Mask; // Clear 4-bit lane
+    *Dst |= static_cast<uint8_t>((Value & 0xF) << Shift); // Set 4-bit lane
+}
+
+template<typename UnpackedType>
+MLAS_FORCEINLINE
+void
+MlasPackInt4Elements(uint8_t* Output, UnpackedType ValueLow, UnpackedType ValueHigh)
+{
+    static_assert(std::is_same_v<UnpackedType, uint8_t> || std::is_same_v<UnpackedType, int8_t>);
+    *Output = static_cast<uint8_t>(((ValueHigh & 0xF) << 4) | (ValueLow & 0xF));
+}
+

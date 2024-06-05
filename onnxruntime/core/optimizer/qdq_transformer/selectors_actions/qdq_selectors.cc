@@ -20,6 +20,11 @@ constexpr bool Is16BitIntType(int32_t data_type) {
          (data_type == ONNX_NAMESPACE::TensorProto_DataType::TensorProto_DataType_UINT16);
 }
 
+constexpr bool Is4BitIntType(int32_t data_type) {
+  return (data_type == ONNX_NAMESPACE::TensorProto_DataType::TensorProto_DataType_INT4) ||
+         (data_type == ONNX_NAMESPACE::TensorProto_DataType::TensorProto_DataType_UINT4);
+}
+
 // adjust for an optional input/output that has an entry but does not exist
 int NumActualValues(const Node& node, bool input) {
   const auto& defs = input ? node.InputDefs() : node.OutputDefs();
@@ -58,8 +63,8 @@ bool NodeGroupSelector::CheckQDQNodes(const GraphViewer& graph_viewer, const Nod
     return false;
   }
 
-  if (const auto dq_validation_status = QDQ::ValidateNodeGroupDQNodes(graph_viewer, node, dq_nodes);
-      !dq_validation_status.IsOK()) {
+  if (const auto qdq_validation_status = NodeGroup::CanCreateNodeGroup(graph_viewer, node, dq_nodes, q_nodes);
+      !qdq_validation_status.IsOK()) {
     return false;
   }
 
@@ -91,6 +96,13 @@ std::optional<NodeGroup> NodeGroupSelector::GetQDQSelection(const GraphViewer& g
 }
 
 std::optional<NodesToOptimizeIndices> BaseSelector::Select(const GraphViewer& graph_viewer, const Node& node) const {
+  const std::string_view node_ep = node.GetExecutionProviderType();
+
+  if (!compatible_providers_.empty() &&
+      std::find(compatible_providers_.begin(), compatible_providers_.end(), node_ep) == compatible_providers_.end()) {
+    return std::nullopt;
+  }
+
   const auto qdq_group = node_group_selector_->GetQDQSelection(graph_viewer, node);
   if (!qdq_group.has_value()) {
     return std::nullopt;
@@ -127,6 +139,10 @@ bool DropQDQNodeGroupSelector::Check(const GraphViewer& graph_viewer,
     return false;
   }
 
+  if (!allow_4bit_ && Is4BitIntType(dt_input)) {
+    return false;
+  }
+
   const Node& dq_node = *dq_nodes.front();
   const Node& q_node = *q_nodes.front();
 
@@ -146,8 +162,8 @@ bool DropDQNodeGroupSelector::Check(const GraphViewer& graph_viewer,
     return false;
   }
 
-  if (const auto dq_validation_status = QDQ::ValidateNodeGroupDQNodes(graph_viewer, node, dq_nodes);
-      !dq_validation_status.IsOK()) {
+  if (const auto qdq_validation_status = NodeGroup::CanCreateNodeGroup(graph_viewer, node, dq_nodes, q_nodes);
+      !qdq_validation_status.IsOK()) {
     return false;
   }
 
@@ -157,6 +173,10 @@ bool DropDQNodeGroupSelector::Check(const GraphViewer& graph_viewer,
 
   // 16-bit int types must be explicitly allowed.
   if (!allow_16bit_ && Is16BitIntType(dt_input)) {
+    return false;
+  }
+
+  if (!allow_4bit_ && Is4BitIntType(dt_input)) {
     return false;
   }
 
@@ -186,6 +206,10 @@ bool UnaryNodeGroupSelector::Check(const GraphViewer& graph_viewer, const Node& 
     return false;
   }
 
+  if (!allow_4bit_ && Is4BitIntType(dt_input)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -208,6 +232,10 @@ bool BinaryNodeGroupSelector::Check(const GraphViewer& graph_viewer,
 
   // 16-bit int types must be explicitly allowed.
   if (!allow_16bit_ && Is16BitIntType(dt_input_1)) {
+    return false;
+  }
+
+  if (!allow_4bit_ && Is4BitIntType(dt_input_1)) {
     return false;
   }
 
@@ -246,6 +274,10 @@ bool VariadicNodeGroupSelector::Check(const GraphViewer& graph_viewer,
     return false;
   }
 
+  if (!allow_4bit_ && Is4BitIntType(dt_input)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -267,6 +299,10 @@ bool SplitNodeGroupSelector::Check(const GraphViewer& graph_viewer,
 
   const Node& dq_node = *dq_nodes.front();
   int32_t dt_input = dq_node.InputDefs()[0]->TypeAsProto()->tensor_type().elem_type();
+
+  if (!allow_4bit_ && Is4BitIntType(dt_input)) {
+    return false;
+  }
 
   // All Q outputs should have same data type and (optionally) equal quantization parameters as the input.
   for (size_t q_idx = 0; q_idx < q_nodes.size(); q_idx++) {
@@ -302,6 +338,10 @@ bool ConvNodeGroupSelector::Check(const GraphViewer& graph_viewer,
   int32_t dt_weight = dq_nodes[1]->InputDefs()[0]->TypeAsProto()->tensor_type().elem_type();
   int32_t dt_output = q_nodes[0]->OutputDefs()[0]->TypeAsProto()->tensor_type().elem_type();
   if (dt_input != dt_output) {
+    return false;
+  }
+
+  if (!allow_4bit_weight_ && Is4BitIntType(dt_weight)) {
     return false;
   }
 
@@ -349,6 +389,11 @@ bool MatMulNodeGroupSelector::Check(const GraphViewer& graph_viewer,
 
   // 16-bit int types must be explicitly allowed.
   if (!allow_16bit_ && (Is16BitIntType(dt_input) || Is16BitIntType(dt_weight))) {
+    return false;
+  }
+
+  // 4-bit int types must be explicitly allowed.
+  if (!allow_4bit_ && (Is4BitIntType(dt_input) || Is4BitIntType(dt_weight))) {
     return false;
   }
 
@@ -400,6 +445,10 @@ bool GemmNodeGroupSelector::Check(const GraphViewer& graph_viewer,
     return false;
   }
 
+  if (!allow_4bit_ && (Is4BitIntType(dt_A) || Is4BitIntType(dt_B))) {
+    return false;
+  }
+
   if (dq_nodes.size() < 3) {  // no bias
     return true;
   }
@@ -435,6 +484,10 @@ bool WhereNodeGroupSelector::Check(const GraphViewer& graph_viewer, const Node& 
 
   // 16-bit int types must be explicitly allowed.
   if (!allow_16bit_ && Is16BitIntType(dt_input_1)) {
+    return false;
+  }
+
+  if (!allow_4bit_ && Is4BitIntType(dt_input_1)) {
     return false;
   }
 
@@ -537,8 +590,8 @@ bool TopKNodeGroupSelector::Check(const GraphViewer& graph_viewer,
     return false;
   }
 
-  if (const auto dq_validation_status = QDQ::ValidateNodeGroupDQNodes(graph_viewer, node, dq_nodes);
-      !dq_validation_status.IsOK()) {
+  if (const auto qdq_validation_status = QDQ::NodeGroup::CanCreateNodeGroup(graph_viewer, node, dq_nodes, q_nodes);
+      !qdq_validation_status.IsOK()) {
     return false;
   }
 

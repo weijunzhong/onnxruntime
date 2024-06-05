@@ -1,12 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+import {DataType} from '../../../wasm-common';
 import {TensorView} from '../../tensor-view';
 import {ShapeUtil} from '../../util';
 import {AttributeWithCacheKey, createAttributeWithCacheKey} from '../attribute-with-cache-key';
 import {ComputeContext, ProgramInfo} from '../types';
 
-import {createTensorShapeVariables, enableShapesUniforms, IndicesHelper, inputVariable, outputVariable, ShaderHelper} from './common';
+import {createTensorShapeVariables, IndicesHelper, inputVariable, outputVariable, ShaderHelper} from './common';
 
 export interface TransposeAttributes extends AttributeWithCacheKey {
   readonly perm: number[];
@@ -39,14 +40,33 @@ export const createTransposeProgramInfo = (inputTensor: TensorView, permAttr: nu
   const inputDataType = inputTensor.dataType;
   const inputRank = inputTensor.dims.length;
   const perm = getAdjustedPerm(inputRank, permAttr);
-  const useShapesUniforms = enableShapesUniforms(inputRank);
   const outputShape = getOutputShape(inputTensor.dims, perm);
-  const outShapeOrRank = useShapesUniforms ? outputShape.length : outputShape;
-  const inShapeOrRank = useShapesUniforms ? inputRank : inputTensor.dims;
-  const output = outputVariable('output', inputDataType, outShapeOrRank);
-  const input = inputVariable('a', inputDataType, inShapeOrRank);
-
-  const getShaderSource = (shaderHelper: ShaderHelper) => `
+  const output = outputVariable('output', inputDataType, outputShape.length);
+  const input = inputVariable('a', inputDataType, inputRank);
+  let getShaderSource;
+  if (perm.length === 2 && perm[0] === 1 && perm[1] === 0) {
+    const wgslType = output.type.value;
+    const workgroupSize: [number, number, number] = [16, 16, 1];
+    getShaderSource = (shaderHelper: ShaderHelper) => `
+  ${shaderHelper.registerUniform('output_size', 'u32').declareVariables(input, output)}
+  var<workgroup> tile : array<array<${wgslType}, ${workgroupSize[0] + 1}>, ${workgroupSize[0]}>;
+  ${shaderHelper.mainStart(workgroupSize)}
+    var x = workgroup_id.x * ${workgroupSize[0]}u + local_id.x;
+    var y = workgroup_id.y * ${workgroupSize[0]}u + local_id.y;
+    let width = uniforms.output_shape[0];
+    let height = uniforms.output_shape[1];
+    if (x < width && y < height) {
+      tile[local_id.y][local_id.x] = ${input.getByOffset('y * width + x')};
+    }
+    workgroupBarrier();
+    x = workgroup_id.y * ${workgroupSize[0]}u + local_id.x;
+    y = workgroup_id.x * ${workgroupSize[0]}u + local_id.y;
+    if (x < height && y < width) {
+      ${output.setByOffset('y * height + x', 'tile[local_id.x][local_id.y]')}
+    }
+  }`;
+  } else {
+    getShaderSource = (shaderHelper: ShaderHelper) => `
   ${shaderHelper.registerUniform('output_size', 'u32').declareVariables(input, output)}
 
   ${permFunctionBody(perm, inputRank, input, output)}
@@ -59,23 +79,17 @@ export const createTransposeProgramInfo = (inputTensor: TensorView, permAttr: nu
 
     ${output.setByOffset('global_idx', input.getByIndices('aIndices'))}
   }`;
+  }
   return {
     name: 'Transpose',
-    shaderCache: {hint: `${permAttr}`, inputDependencies: useShapesUniforms ? ['rank'] : ['dims']},
+    shaderCache: {hint: `${permAttr}`, inputDependencies: ['rank']},
     getRunData: (inputs) => {
       const outputSize = ShapeUtil.size(outputShape);
       return {
         outputs: [{dims: outputShape, dataType: inputs[0].dataType}],
         dispatchGroup: {x: Math.ceil(outputSize / 64 /* workgroup size */)},
-        programUniforms: useShapesUniforms ?
-            [
-              {type: 'uint32', data: outputSize},
-              ...createTensorShapeVariables(inputs[0].dims),
-              ...createTensorShapeVariables(outputShape),
-            ] :
-            [
-              {type: 'uint32', data: outputSize},
-            ],
+        programUniforms:
+            [{type: DataType.uint32, data: outputSize}, ...createTensorShapeVariables(inputs[0].dims, outputShape)],
       };
     },
     getShaderSource,

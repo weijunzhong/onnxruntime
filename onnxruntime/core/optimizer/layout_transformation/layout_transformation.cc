@@ -31,6 +31,7 @@ CostCheckResult PostLayoutTransformCostCheck(const api::GraphRef& graph, const a
 }
 
 #if defined(USE_CUDA) && ENABLE_CUDA_NHWC_OPS
+// TODO(mtavenrath) generate list from registered kernels using nhwc domain
 const std::unordered_set<std::string_view>& GetCUDALayoutSensitiveOps() {
   static std::unordered_set<std::string_view> cuda_nhwc_ops = []() {
     return std::unordered_set<std::string_view>{
@@ -41,7 +42,10 @@ const std::unordered_set<std::string_view>& GetCUDALayoutSensitiveOps() {
         "MaxPool",
         "GlobalAveragePool",
         "AveragePool",
-    };
+        "GridSample",
+        "DepthToSpace",
+        "SpaceToDepth",
+        "LRN"};
   }();
   return cuda_nhwc_ops;
 }
@@ -162,8 +166,7 @@ Status TransformLayoutForEP(Graph& graph, bool& modified, const IExecutionProvid
       // Except for resize and convolution ops, all the other layout sensitive ops only require layout transformation
       // for 0th input and output. For resize, add the other relevant inputs which need conversion. For Conv - layout
       // transformer only converts layout for 0th input, weights should be handled by every EP.
-      // For resize in WebNN EP, we don't want to convert all the inputs except the 0th input.
-      if (node->OpType() == "Resize" && node->GetExecutionProviderType() != kWebNNExecutionProvider) {
+      if (node->OpType() == "Resize") {
         // Older versions of resize have a bug where ROI and Scales cannot be made empty inputs. To handle this case,
         // we need to jump a few extra hoops to make sure its inputs are correctly handled.
         //
