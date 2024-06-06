@@ -61,8 +61,7 @@ class Config:
         return (
             f"Config(batch_size={self.batch_size}, sequence_length={self.sequence_length}, "
             f"kv_sequence_length={self.kv_sequence_length}, past_sequence_length={self.past_sequence_length}, "
-            f"past_sequence_length={self.past_sequence_length}, num_heads={self.num_heads}, "
-            f"kv_num_heads={self.kv_num_heads}, head_size={self.head_size})"
+            f"num_heads={self.num_heads}, kv_num_heads={self.kv_num_heads}, head_size={self.head_size})"
         )
 
 
@@ -90,57 +89,6 @@ class PromptConfig:
             f"kv_sequence_length={self.kv_sequence_length}, buffer_sequence_length={self.buffer_sequence_length}, "
             f"num_heads={self.num_heads}, kv_num_heads={self.kv_num_heads}, head_size={self.head_size})"
         )
-
-
-def create_packed_multihead_attention_graph(config):
-    nodes = [
-        helper.make_node(
-            "PackedMultiHeadAttention",
-            [
-                "query",
-                "",
-                "",
-                "",
-                "token_offset",
-                "cumulative_sequence_length",
-            ],
-            ["output"],
-            "PackedMultiHeadAttention_0",
-            num_heads=config.num_heads,
-            domain="com.microsoft",
-        ),
-    ]
-
-    graph = helper.make_graph(
-        nodes,
-        "PackedMultiHeadAttention_Graph",
-        [
-            helper.make_tensor_value_info(
-                "query",
-                TensorProto.FLOAT16,
-                [
-                    -1,
-                    config.num_heads,
-                    3,
-                    config.head_size,
-                ],
-            ),
-            helper.make_tensor_value_info(
-                "token_offset", TensorProto.INT32, [config.batch_size, config.sequence_length]
-            ),
-            helper.make_tensor_value_info("cumulative_sequence_length", TensorProto.INT32, [config.batch_size + 1]),
-        ],
-        [
-            helper.make_tensor_value_info(
-                "output",
-                TensorProto.FLOAT16,
-                [-1, config.num_heads * config.head_size],
-            ),
-        ],
-    )
-
-    model = helper.make_model(graph)
-    return model.SerializeToString()
 
 
 def create_multihead_attention_graph(config):
@@ -720,21 +668,6 @@ def generate_token_offset(cu_seqlens, max_seqlen):
     return numpy.asarray(token_offset + token_padset, dtype=numpy.int32)
 
 
-def flash_attn_varlen_qkvpacked_func(qkv_unpad, cu_seqlens, token_offset, config, causal=False):
-    onnx_model_str = create_packed_multihead_attention_graph(config)
-    qkv_unpad = torch.swapdims(qkv_unpad, 1, 2)
-    ort_inputs = {
-        "query": qkv_unpad.detach().cpu().numpy(),
-        "token_offset": token_offset,
-        "cumulative_sequence_length": cu_seqlens.cpu().numpy(),
-    }
-    sess_options = SessionOptions()
-    ort_session = InferenceSession(onnx_model_str, sess_options, providers=["ROCMExecutionProvider"])
-    ort_output = ort_session.run(None, ort_inputs)
-    output = torch.tensor(ort_output)
-    return output
-
-
 def mha_func(q, k, v, config):
     onnx_model_str = create_multihead_attention_graph(config)
     q = torch.reshape(q, (config.batch_size, config.sequence_length, -1))
@@ -889,6 +822,7 @@ def gqa_past_func(
         new_k = torch.reshape(new_k, (config.batch_size, config.sequence_length, -1))
         new_v = torch.reshape(new_v, (config.batch_size, config.sequence_length, -1))
     if share_buffer:
+        print("seqlens_k:", seqlens_k)
         ort_inputs = {
             "query": q.detach().cpu().numpy(),
             "past_key": OrtValue.ortvalue_from_numpy(past_k.detach().cpu().numpy(), "cuda", 0),
@@ -1662,6 +1596,7 @@ def parity_check_gqa_past(
         dtype=torch.int32,
         device="cuda",
     )
+    # cache_seqlens[:] = 6
 
     if rotary:
         rotary_fraction = 1.0
@@ -1709,6 +1644,7 @@ def parity_check_gqa_past(
 
     # Flash function
     if packed:
+        assert False, "not enabled"
         packed_qkv = torch.concatenate([q, new_k, new_v], dim=2)
         out, present_k, present_v = gqa_past_func(
             packed_qkv,
@@ -1745,12 +1681,23 @@ def parity_check_gqa_past(
     out = torch.reshape(out, (config.batch_size, config.sequence_length, config.num_heads, config.head_size))
     out = out.detach().cpu().numpy()
 
+    import numpy as np
+    np.save("ref_k.npy", k_cache_ref.detach().cpu().numpy())
+    np.save("our_k.npy", present_k)
+
+    np.save("ref_v.npy", v_cache_ref.detach().cpu().numpy())
+    np.save("our_v.npy", present_v)
+
     # Make sure past-present buffer updating correctly
     assert numpy.allclose(present_k, k_cache_ref.detach().cpu().numpy(), rtol=rtol, atol=atol, equal_nan=True)
     assert numpy.allclose(present_v, v_cache_ref.detach().cpu().numpy(), rtol=rtol, atol=atol, equal_nan=True)
 
     # Compare results
     all_close = numpy.allclose(out, out_ref, rtol=rtol, atol=atol, equal_nan=True)
+
+    np.save("ref_o.npy", out_ref)
+    np.save("our_o.npy", out)
+
     correct = GREEN + "True" + RESET if all_close else RED + "False" + RESET
     print(
         "KV-buffer",
@@ -1990,19 +1937,6 @@ def parity_check_gqa_past_no_buff(
     return all_close
 
 
-def packed_mha_test_cases():
-    batches = [2] if pipeline_mode else [1, 5]
-    seqs = [8, 97, 256, 1024] if pipeline_mode else [97, 128, 200, 256, 257, 384, 512, 768, 1024, 1025, 2048]
-    num_h = [1, 3] if pipeline_mode else [1, 6, 16]
-    h_sizes = [16, 256] if pipeline_mode else [32, 40, 64, 80, 96, 128, 160, 192, 224, 256]
-    for b in batches:
-        for s in seqs:
-            for n in num_h:
-                for h in h_sizes:
-                    config = Config(b, s, s, 0, n, n, h)
-                    yield str(config), config
-
-
 def mha_test_cases():
     batches = [2] if pipeline_mode else [1, 5]
     seqs = (
@@ -2032,17 +1966,6 @@ def mha_test_cases():
 
 
 class TestMHA(unittest.TestCase):
-    @parameterized.expand(packed_mha_test_cases())
-    def test_packed_mha(self, _, config):
-        if not torch.cuda.is_available() or platform.system() != "Linux":
-            return
-        major, _ = torch.cuda.get_device_capability()
-        if major < 8:
-            return
-        print("-------- TEST PACKED MHA ---------")
-        all_close = parity_check_mha(config, True)
-        self.assertTrue(all_close)
-
     @parameterized.expand(mha_test_cases())
     def test_mha(self, _, config):
         if not torch.cuda.is_available() or platform.system() != "Linux":
@@ -2203,4 +2126,31 @@ class TestGQA(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    # unittest.main()
+
+    config = Config(5, 1, 128, 127, 4, 2, 72)
+    local, rotary, rotary_interleaved, packed = False,False,False,False
+
+    all_close = parity_check_gqa_past_no_buff(
+        config,
+        local=local,
+        past_format=Formats.BNSH,
+        rtol=1e-3,
+        atol=1e-3,
+        rotary=rotary,
+        rotary_interleaved=rotary_interleaved,
+        packed=packed,
+    )
+    assert all_close
+
+    all_close = parity_check_gqa_past(
+        config,
+        local=local,
+        past_format=Formats.BNSH,
+        rtol=1e-3,
+        atol=1e-3,
+        rotary=rotary,
+        rotary_interleaved=rotary_interleaved,
+        packed=packed,
+    )
+    assert all_close, all_close
