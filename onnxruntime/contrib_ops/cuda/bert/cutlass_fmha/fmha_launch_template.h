@@ -75,10 +75,6 @@ struct RightPaddingBatchHook {
           batch_id * lse_dim * p.num_heads + head_id * lse_dim + query_start;
     }
 
-    // Custom masking
-    // if (p.causal_diagonal_ptr) {
-    //   p.causal_diagonal_offset = p.causal_diagonal_ptr[batch_id];
-    // }
     if (p.custom_mask_type == AttentionKernel::CausalFromBottomRight) {
       p.causal_diagonal_offset = p.num_keys - p.num_queries;
     }
@@ -237,15 +233,6 @@ void LaunchCutlassFmha(const MemoryEfficientAttentionParams& params) {
   kernel_fn<<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes, params.stream>>>(p);
 }
 
-template <typename T, typename ArchTag, bool is_aligned, int queries_per_block, int keys_per_block, int max_head_size>
-void RunCutlassFmha(const MemoryEfficientAttentionParams& params) {
-  constexpr bool kSupportsDropout = true;
-  constexpr bool kSupportsBias = true;
-  using Attention = AttentionKernel<T, ArchTag, is_aligned, queries_per_block, keys_per_block, max_head_size,
-                                    kSupportsDropout, kSupportsBias, DefaultToBatchHook>;
-  LaunchCutlassFmha<T, Attention, queries_per_block>(params);
-}
-
 template <typename T, typename ArchTag, int queries_per_block, int keys_per_block, int max_head_size>
 void DispatchIsAligned(const MemoryEfficientAttentionParams& params) {
   using AlignedAK = AttentionKernel<T, ArchTag, true, queries_per_block, keys_per_block, max_head_size>;
@@ -260,7 +247,10 @@ void DispatchIsAligned(const MemoryEfficientAttentionParams& params) {
                     params.v_head_size % AlignedAK::kAlignmentV == 0;
 
   DISPATCH_BOOL(is_aligned, kIsAligned, ([&]() {
-                  RunCutlassFmha<T, ArchTag, kIsAligned, queries_per_block, keys_per_block, max_head_size>(params);
+                  constexpr bool kSupportsDropout = false;
+                  using Attention = AttentionKernel<T, ArchTag, kIsAligned, queries_per_block, keys_per_block,
+                                                    max_head_size, kSupportsDropout>;
+                  LaunchCutlassFmha<T, Attention, queries_per_block>(params);
                 }));
 
 #if defined(_MSC_VER) && !defined(__clang__)
