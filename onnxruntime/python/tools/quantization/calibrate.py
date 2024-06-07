@@ -128,6 +128,9 @@ class TensorsData:
     def values(self):
         return self.data.values()
 
+    def items(self):
+        return self.data.items()
+
 
 class CalibrationMethod(Enum):
     MinMax = 0
