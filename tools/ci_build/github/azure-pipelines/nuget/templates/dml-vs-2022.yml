@@ -230,7 +230,7 @@ stages:
 
         - task: PublishSymbols@2
           displayName: 'Publish Build Symbols'
-          condition: and (succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/heads/rel-')))
+          condition: and (succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/snnn/symbol2'), startsWith(variables['Build.SourceBranch'], 'refs/heads/rel-')))
           inputs:
             SymbolsFolder: '$(Build.BinariesDirectory)\RelWithDebInfo\RelWithDebInfo'
             SearchPattern: 'onnxruntime.pdb'
